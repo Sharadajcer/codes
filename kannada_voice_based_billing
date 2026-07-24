@@ -1,0 +1,286 @@
+import sys
+import sqlite3
+import tkinter as tk
+from tkinter import messagebox, ttk
+import speech_recognition as sr
+import re
+
+# Fix Unicode print issue for Kannada
+sys.stdout.reconfigure(encoding='utf-8')
+
+# ---------------- Database Setup ----------------
+def connect_db():
+    conn = sqlite3.connect("store.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            product_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            qty INTEGER NOT NULL,
+            price_per_kg_unit REAL NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS billing (
+            bill_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product TEXT NOT NULL,
+            qty INTEGER NOT NULL,
+            price_per_unit REAL NOT NULL,
+            total_price REAL NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+# ---------------- Product Management ----------------
+def add_product():
+    name = name_entry.get().strip()
+    qty = qty_entry.get().strip()
+    price = price_entry.get().strip()
+    
+    if name and qty and price:
+        conn = sqlite3.connect("store.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO products (name, qty, price_per_kg_unit) VALUES (?, ?, ?)", (name, qty, price))
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Success", "Product added successfully!")
+        load_products()
+    else:
+        messagebox.showerror("Error", "Please fill all fields.")
+
+def load_products():
+    conn = sqlite3.connect("store.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM products")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    product_tree.delete(*product_tree.get_children())
+    for row in rows:
+        product_tree.insert("", "end", values=row)
+
+def delete_product():
+    selected_item = product_tree.selection()
+    if not selected_item:
+        messagebox.showerror("Error", "Select a product to delete.")
+        return
+
+    product_id = product_tree.item(selected_item[0])["values"][0]
+    product_name = product_tree.item(selected_item[0])["values"][1]
+
+    confirm = messagebox.askyesno("Confirm", f"Are you sure you want to delete '{product_name}'?")
+    if confirm:
+        conn = sqlite3.connect("store.db")
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM products WHERE product_id = ?", (product_id,))
+        conn.commit()
+        conn.close()
+        load_products()
+        messagebox.showinfo("Deleted", "Product deleted successfully!")
+
+# ---------------- Billing Management ----------------
+def add_billing():
+    product_name = billing_product_entry.get().strip()
+    qty = billing_qty_entry.get().strip()
+
+    if not product_name or not qty:
+        messagebox.showerror("Error", "Enter product and quantity.")
+        return
+
+    try:
+        qty = int(qty)
+    except ValueError:
+        messagebox.showerror("Error", "Quantity must be a number.")
+        return
+
+    conn = sqlite3.connect("store.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT qty, price_per_kg_unit FROM products WHERE LOWER(name)=?", (product_name.lower(),))
+    product = cursor.fetchone()
+    
+    if product:
+        available_qty, price_per_unit = product
+        if qty > available_qty:
+            messagebox.showerror("Error", "Not enough stock available.")
+        else:
+            total_price = qty * price_per_unit
+            cursor.execute("INSERT INTO billing (product, qty, price_per_unit, total_price) VALUES (?, ?, ?, ?)", 
+                           (product_name, qty, price_per_unit, total_price))
+            cursor.execute("UPDATE products SET qty=? WHERE LOWER(name)=?", (available_qty - qty, product_name.lower()))
+            conn.commit()
+            load_products()
+            load_billing()
+            messagebox.showinfo("Success", "Billing entry added successfully!")
+    else:
+        messagebox.showerror("Error", f"Product '{product_name}' not found!")
+    
+    conn.close()
+
+def load_billing():
+    conn = sqlite3.connect("store.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM billing")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    billing_tree.delete(*billing_tree.get_children())
+    total_amount = 0
+    for row in rows:
+        billing_tree.insert("", "end", values=row)
+        total_amount += row[4]
+
+    total_label.config(text=f"Total Bill: ₹{total_amount:.2f}")
+
+def complete_bill():
+    conn = sqlite3.connect("store.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM billing")
+    conn.commit()
+    conn.close()
+
+    billing_tree.delete(*billing_tree.get_children())
+    total_label.config(text="Total Bill: ₹0.00")
+
+    messagebox.showinfo("Billing Complete", "New billing session started!")
+
+# ---------------- Kannada Voice Recognition ----------------
+def process_voice_input(text):
+    import re
+    print("Raw voice input:", text.encode('utf-8', 'ignore').decode('utf-8'))
+
+    # Kannada number map
+    num_map = {
+        "ಒಂದು": "1", "ಎರಡು": "2", "ಮೂರು": "3", "ನಾಲ್ಕು": "4", "ಐದು": "5",
+        "ಆರು": "6", "ಏಳು": "7", "ಎಂಟು": "8", "ಒಂಬತ್ತು": "9", "ಹತ್ತು": "10",
+        "ಇಪ್ಪತ್ತು": "20", "ಮೂವತ್ತು": "30", "ನಲವತ್ತು": "40", "ಐವತ್ತು": "50"
+    }
+    for kn_num, en_num in num_map.items():
+        text = text.replace(kn_num, en_num)
+
+    # Kannada → English unit map
+    unit_map = {
+        "ಕೆಜಿ": "kg", "ಕೇಜಿ": "kg", "ಗ್ರಾಂ": "grams", "ಲಿಟರ್": "liters",
+        "ಮಿಲಿಲಿಟರ್": "ml", "ಯೂನಿಟ್": "unit", "ಯೂನಿಟ್ಗಳು": "units"
+    }
+    for kn_unit, en_unit in unit_map.items():
+        text = text.replace(kn_unit, f" {en_unit} ")
+
+    # Kannada → English product map
+    product_map = {
+        "ಅಕ್ಕಿ": "rice", "ಸಕ್ಕರೆ": "sugar", "ಉಪ್ಪು": "salt", "ಎಣ್ಣೆ": "oil",
+        "ಹಾಲು": "milk", "ಕಾಫಿ": "coffee", "ಚಹಾ": "tea", "ಬಿಸ್ಕಟ್": "biscuit",
+        "ಮೈದಾ": "maida", "ಹಿಟ್ಟು": "flour"
+    }
+    for kn_product, en_product in product_map.items():
+        text = text.replace(kn_product, en_product)
+
+    # Normalize spaces & remove hidden unicode
+    text = re.sub(r"[\u200b\u200c\u200d]", "", text)
+    text = re.sub(r"\s+", " ", text.strip())
+    print("Processed text:", text.encode('utf-8', 'ignore').decode('utf-8'))
+
+    # Updated regex (handles multi-digit numbers like 10, 20, 30)
+    match = re.search(r"(\d{1,3})\s*(kg|grams|g|ml|liters|l|unit|units)?\s*([a-zA-Z]+)", text, re.IGNORECASE)
+
+    if match:
+        qty = int(match.group(1))
+        product_name = match.group(3).strip().lower()
+
+        billing_product_entry.delete(0, tk.END)
+        billing_qty_entry.delete(0, tk.END)
+        billing_product_entry.insert(0, product_name)
+        billing_qty_entry.insert(0, str(qty))
+
+        print(f"✅ Adding to billing: {qty} × {product_name}")
+        add_billing()
+    else:
+        messagebox.showerror("Error", "Please say like 'ಒಂದು ಕೇಜಿ ಅಕ್ಕಿ' (One kg rice).")
+
+
+def voice_add_billing():
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        messagebox.showinfo("Voice Input", "Say something like: 'ಒಂದು ಕೇಜಿ ಅಕ್ಕಿ'")
+        recognizer.adjust_for_ambient_noise(source)
+        try:
+            audio = recognizer.listen(source)
+            text = recognizer.recognize_google(audio, language="kn-IN")
+            process_voice_input(text.lower())
+        except sr.UnknownValueError:
+            messagebox.showerror("Error", "Could not understand your voice.")
+        except sr.RequestError:
+            messagebox.showerror("Error", "Internet connection issue.")
+
+# ---------------- GUI Setup ----------------
+root = tk.Tk()
+root.title("Product Management & Billing")
+root.geometry("800x600")
+
+# Product Frame
+frame = tk.Frame(root)
+frame.pack(pady=10)
+
+tk.Label(frame, text="Name").grid(row=0, column=0)
+name_entry = tk.Entry(frame)
+name_entry.grid(row=0, column=1)
+
+tk.Label(frame, text="Quantity").grid(row=1, column=0)
+qty_entry = tk.Entry(frame)
+qty_entry.grid(row=1, column=1)
+
+tk.Label(frame, text="Price per Unit").grid(row=2, column=0)
+price_entry = tk.Entry(frame)
+price_entry.grid(row=2, column=1)
+
+tk.Button(frame, text="Add Product", command=add_product).grid(row=3, column=0)
+tk.Button(frame, text="Load Products", command=load_products).grid(row=3, column=1)
+tk.Button(frame, text="Delete Product", command=delete_product).grid(row=3, column=2)
+
+# Product Table
+product_tree = ttk.Treeview(root, columns=("ID", "Name", "Qty", "Price"), show="headings")
+product_tree.heading("ID", text="ID")
+product_tree.heading("Name", text="Name")
+product_tree.heading("Qty", text="Quantity")
+product_tree.heading("Price", text="Price per Unit")
+product_tree.pack()
+
+# Billing Frame
+tk.Label(root, text="Billing Section").pack()
+billing_frame = tk.Frame(root)
+billing_frame.pack(pady=10)
+
+tk.Label(billing_frame, text="Product Name").grid(row=0, column=0)
+billing_product_entry = tk.Entry(billing_frame)
+billing_product_entry.grid(row=0, column=1)
+
+tk.Label(billing_frame, text="Quantity").grid(row=1, column=0)
+billing_qty_entry = tk.Entry(billing_frame)
+billing_qty_entry.grid(row=1, column=1)
+
+tk.Button(billing_frame, text="Add Billing", command=add_billing).grid(row=2, column=0)
+tk.Button(billing_frame, text="Voice Billing (Kannada)", command=voice_add_billing).grid(row=2, column=1)
+
+# Billing Table
+billing_tree = ttk.Treeview(root, columns=("ID", "Product", "Qty", "Price", "Total"), show="headings")
+billing_tree.heading("ID", text="ID")
+billing_tree.heading("Product", text="Product")
+billing_tree.heading("Qty", text="Qty")
+billing_tree.heading("Price", text="Price/Unit")
+billing_tree.heading("Total", text="Total Price")
+billing_tree.pack()
+
+# Total Label
+total_label = tk.Label(root, text="Total Bill: ₹0.00", font=("Arial", 12, "bold"))
+total_label.pack()
+
+# Complete Bill Button
+tk.Button(root, text="Complete Bill", command=complete_bill, bg="red", fg="white").pack(pady=10)
+
+# Init
+connect_db()
+load_products()
+load_billing()
+root.mainloop()
+
+
